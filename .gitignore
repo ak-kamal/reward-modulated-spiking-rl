@@ -216,3 +216,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Model checkpoints (large binaries)
+results/models/*.pt
+results/models/*.pth
+results/models/*.ckpt
+
+# Keep directory structure but ignore contents of models/
+!results/models/.gitkeep
+
+# Ruff cache
+.ruff_cache/
+
+# Pytest cache (already in Python template, but just in case)
+.pytest_cache/
