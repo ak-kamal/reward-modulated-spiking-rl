@@ -25,6 +25,7 @@ torch = { index = "pytorch" }
 dev = [
     "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
+    "pygame>=2.6.1",
     "pytest>=9.1.1",
     "ruff>=0.16.9",
 ]
