@@ -1,0 +1,374 @@
+"""
+LIF neuron wrappers for reward-modulated spiking RL.
+
+This module provides two classes built on top of SpikingJelly's
+``neuron.LIFNode``:
+
+1. ``LIFNodeWithTrace`` — a standard LIF neuron that additionally maintains
+   decaying pre-synaptic and post-synaptic traces. These traces are the
+   building blocks for the eligibility trace used in the three-factor
+   R-STDP learning rule.
+
+2. ``NonSpikingLIFNode`` — a LIF neuron that never fires. It returns its
+   final membrane potential instead of spikes. This is the standard
+   SpikingJelly pattern for producing continuous outputs (Q-values, action
+   logits, value estimates) from a spiking network.
+
+The design follows the SpikingJelly convention: we inherit from the
+official ``LIFNode`` and extend it minimally, rather than reimplementing
+LIF dynamics from scratch. This gives us correct membrane dynamics,
+surrogate gradients, and state management for free.
+
+References
+----------
+- SpikingJelly neuron tutorial (clock-driven neurons):
+  https://spikingjelly.readthedocs.io/zh-cn/latest/legacy_tutorials/en/0_neuron.html
+- SpikingJelly A2C actor-critic example (NonSpikingLIFNode pattern):
+  https://spikingjelly.readthedocs.io/zh-cn/0.0.0.0.6/clock_driven_en/7_a2c_cart_pole.html
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import torch
+import torch.nn as nn
+from spikingjelly.activation_based import neuron, surrogate
+
+
+class LIFNodeWithTrace(neuron.LIFNode):
+    """A LIF neuron that maintains decaying pre- and post-synaptic traces.
+
+    The eligibility trace for a synapse ``(i, j)`` is approximated as the
+    product of a pre-synaptic trace (activity of neuron ``i``) and a
+    post-synaptic trace (spikes of neuron ``j``), each decaying
+    exponentially. This factorization is a standard approximation in
+    three-factor learning rules (see e-prop, Bellec et al. 2020).
+
+    Parameters
+    ----------
+    tau : float, optional
+        Membrane time constant. Passed through to ``neuron.LIFNode``.
+    tau_trace : float, optional
+        Time constant for the pre- and post-synaptic trace decay.
+        Default is 20.0 (20 time steps).
+    v_threshold : float, optional
+        Firing threshold. Default 1.0.
+    v_reset : float, optional
+        Reset voltage after a spike. Default 0.0.
+    surrogate_function : callable, optional
+        Surrogate gradient function for backpropagation. Default is
+        ``surrogate.ATan()``.
+    **kwargs
+        Additional keyword arguments passed to ``neuron.LIFNode``.
+
+    Attributes
+    ----------
+    pre_trace : torch.Tensor or None
+        Decaying trace of the neuron's input (pre-synaptic activity).
+        Shape matches the input to ``forward``. ``None`` before the first
+        forward pass.
+    post_trace : torch.Tensor or None
+        Decaying trace of the neuron's spike output (post-synaptic
+        activity). Shape matches the output of ``forward``.
+    """
+
+    def __init__(
+        self,
+        tau: float = 2.0,
+        tau_trace: float = 20.0,
+        v_threshold: float = 1.0,
+        v_reset: float = 0.0,
+        surrogate_function: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        if surrogate_function is None:
+            surrogate_function = surrogate.ATan()
+
+        super().__init__(
+            tau=tau,
+            v_threshold=v_threshold,
+            v_reset=v_reset,
+            surrogate_function=surrogate_function,
+            **kwargs,
+        )
+
+        self.tau_trace = tau_trace
+
+        # Trace buffers. Initialized to None; created on the first forward
+        # pass once we know the input shape.
+        self.pre_trace: torch.Tensor | None = None
+        self.post_trace: torch.Tensor | None = None
+
+        # Precompute the decay factor for efficiency.
+        self._trace_decay = 1.0 - (1.0 / tau_trace)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass: integrate input, emit spikes, update traces.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input to the neuron (pre-synaptic current).
+
+        Returns
+        -------
+        torch.Tensor
+            Spike output (0 or 1) with the same shape as ``x``.
+        """
+        # Standard LIF dynamics and spike generation.
+        spikes = super().forward(x)
+
+        # Initialize traces on the first forward pass.
+        if self.pre_trace is None:
+            self.pre_trace = torch.zeros_like(x)
+            self.post_trace = torch.zeros_like(spikes)
+
+        # Update pre-synaptic trace: exponential decay + new input.
+        # Using a simple leaky integrator.
+        self.pre_trace = (
+            self._trace_decay * self.pre_trace
+            + (1.0 - self._trace_decay) * x
+        )
+
+        # Update post-synaptic trace: exponential decay + new spikes.
+        self.post_trace = (
+            self._trace_decay * self.post_trace
+            + (1.0 - self._trace_decay) * spikes
+        )
+
+        return spikes
+
+    def reset_traces(self) -> None:
+        """Reset pre- and post-synaptic traces to zero.
+
+        Call this between episodes or when the environment resets.
+        """
+        if self.pre_trace is not None:
+            self.pre_trace = torch.zeros_like(self.pre_trace)
+        if self.post_trace is not None:
+            self.post_trace = torch.zeros_like(self.post_trace)
+
+    def get_eligibility(self) -> torch.Tensor | None:
+        """Compute the eligibility trace as the outer product of traces.
+
+        Returns
+        -------
+        torch.Tensor or None
+            Eligibility trace of shape ``(out_features, in_features)``,
+            or ``None`` if no forward pass has been made yet.
+        """
+        if self.pre_trace is None or self.post_trace is None:
+            return None
+
+        # Outer product: (out_features,) x (in_features,) -> (out, in)
+        # Then average over the batch dimension.
+        pre = self.pre_trace  # shape: (batch, in_features)
+        post = self.post_trace  # shape: (batch, out_features)
+
+        # Expand and multiply, then average over batch.
+        # pre: (batch, 1, in), post: (batch, out, 1)
+        eligibility = (post.unsqueeze(-1) * pre.unsqueeze(-2)).mean(dim=0)
+
+        return eligibility
+
+
+class NonSpikingLIFNode(neuron.LIFNode):
+    """A LIF neuron that never fires; returns membrane potential instead.
+
+    This is the standard SpikingJelly pattern for producing continuous
+    outputs from a spiking network. The neuron integrates input and
+    updates its membrane potential, but it does not emit spikes and does
+    not reset its voltage. The membrane potential is returned directly.
+
+    This is used for the actor and critic output layers, where we need
+    continuous values (action logits, state value) rather than binary
+    spikes.
+
+    Parameters
+    ----------
+    tau : float, optional
+        Membrane time constant. Default 2.0.
+    **kwargs
+        Additional keyword arguments passed to ``neuron.LIFNode``.
+    """
+
+    def __init__(self, tau: float = 2.0, **kwargs: Any) -> None:
+        # Use a very large finite threshold instead of inf, to avoid
+        # type-casting issues in some SpikingJelly code paths.
+        kwargs.setdefault("v_threshold", 1e6)
+        super().__init__(tau=tau, **kwargs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass: integrate input, return membrane potential.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input to the neuron.
+
+        Returns
+        -------
+        torch.Tensor
+            Membrane potential after integration.
+        """
+        # Lazily initialize v as a tensor matching the input shape.
+        # SpikingJelly's LIFNode starts with self.v = 0.0 (a float);
+        # neuronal_charge requires a Tensor.
+        if not isinstance(self.v, torch.Tensor):
+            self.v = torch.zeros_like(x)
+        
+        # Charge the membrane potential.
+        self.neuronal_charge(x)
+        # Skip neuronal_fire() and neuronal_reset().
+        return self.v
+
+
+class NonSpikingLIFNodeWithTrace(NonSpikingLIFNode):
+    """Non-spiking LIF neuron that also maintains eligibility traces.
+
+    This combines the continuous-output behavior of ``NonSpikingLIFNode``
+    with the trace maintenance of ``LIFNodeWithTrace``. Used for output
+    layers that need both continuous values and trace-based learning.
+    """
+
+    def __init__(
+        self,
+        tau: float = 2.0,
+        tau_trace: float = 20.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(tau=tau, **kwargs)
+        self.tau_trace = tau_trace
+        self.pre_trace: torch.Tensor | None = None
+        self.post_trace: torch.Tensor | None = None
+        self._trace_decay = 1.0 - (1.0 / tau_trace)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass: integrate, update traces, return membrane potential."""
+        output = super().forward(x)  # membrane potential (continuous)
+
+        if self.pre_trace is None:
+            self.pre_trace = torch.zeros_like(x)
+            self.post_trace = torch.zeros_like(output)
+
+        self.pre_trace = (
+            self._trace_decay * self.pre_trace
+            + (1.0 - self._trace_decay) * x
+        )
+        self.post_trace = (
+            self._trace_decay * self.post_trace
+            + (1.0 - self._trace_decay) * output
+        )
+
+        return output
+
+    def reset_traces(self) -> None:
+        """Reset traces to zero."""
+        if self.pre_trace is not None:
+            self.pre_trace = torch.zeros_like(self.pre_trace)
+        if self.post_trace is not None:
+            self.post_trace = torch.zeros_like(self.post_trace)
+
+    def get_eligibility(self) -> torch.Tensor | None:
+        """Compute eligibility trace as outer product of pre and post traces."""
+        if self.pre_trace is None or self.post_trace is None:
+            return None
+        pre = self.pre_trace
+        post = self.post_trace
+        return (post.unsqueeze(-1) * pre.unsqueeze(-2)).mean(dim=0)
+
+
+# ----------------------------------------------------------------------
+# Convenience factory functions
+# ----------------------------------------------------------------------
+
+
+def create_lif_layer(
+    in_features: int,
+    out_features: int,
+    tau: float = 2.0,
+    tau_trace: float = 20.0,
+    use_trace: bool = True,
+    **kwargs: Any,
+) -> nn.Sequential:
+    """Create a linear + LIF layer.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    out_features : int
+        Number of output features (neurons in this layer).
+    tau : float
+        Membrane time constant.
+    tau_trace : float
+        Trace decay time constant (used only if ``use_trace=True``).
+    use_trace : bool
+        If True, use ``LIFNodeWithTrace``; otherwise use the standard
+        ``neuron.LIFNode``.
+    **kwargs
+        Additional keyword arguments passed to the neuron.
+
+    Returns
+    -------
+    nn.Sequential
+        A sequential module: ``Linear(in_features, out_features) → LIF``.
+    """
+    neuron_cls = LIFNodeWithTrace if use_trace else neuron.LIFNode
+
+    if use_trace:
+        lif = neuron_cls(
+            tau=tau, tau_trace=tau_trace, **kwargs
+        )
+    else:
+        lif = neuron_cls(tau=tau, **kwargs)
+
+    return nn.Sequential(
+        nn.Linear(in_features, out_features),
+        lif,
+    )
+
+
+def create_non_spiking_lif_layer(
+    in_features: int,
+    out_features: int,
+    tau: float = 2.0,
+    tau_trace: float = 20.0,
+    use_trace: bool = False,
+    **kwargs: Any,
+) -> nn.Sequential:
+    """Create a linear + NonSpikingLIF layer for continuous outputs.
+
+    Parameters
+    ----------
+    in_features : int
+        Number of input features.
+    out_features : int
+        Number of output features.
+    tau : float
+        Membrane time constant.
+    tau_trace : float
+        Trace decay time constant (used only if ``use_trace=True``).
+    use_trace : bool
+        If True, use ``NonSpikingLIFNodeWithTrace``; otherwise use
+        ``NonSpikingLIFNode``.
+    **kwargs
+        Additional keyword arguments passed to the neuron.
+
+    Returns
+    -------
+    nn.Sequential
+        A sequential module: ``Linear(in_features, out_features) → NonSpikingLIF``.
+    """
+    neuron_cls = NonSpikingLIFNodeWithTrace if use_trace else NonSpikingLIFNode
+
+    if use_trace:
+        lif = neuron_cls(tau=tau, tau_trace=tau_trace, **kwargs)
+    else:
+        lif = neuron_cls(tau=tau, **kwargs)
+
+    return nn.Sequential(
+        nn.Linear(in_features, out_features),
+        lif,
+    )
