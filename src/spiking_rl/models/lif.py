@@ -171,6 +171,18 @@ class LIFNodeWithTrace(neuron.LIFNode):
         eligibility = (post.unsqueeze(-1) * pre.unsqueeze(-2)).mean(dim=0)
 
         return eligibility
+    
+    def reset(self) -> None:
+        """Reset both the membrane potential and the eligibility traces.
+
+        This overrides the parent ``LIFNode.reset()`` so that a single
+        ``reset()`` call cleans up everything related to this neuron's
+        state. Without this override, ``reset()`` would zero the voltage
+        but leave ``pre_trace`` and ``post_trace`` at their last values,
+        silently leaking state across episodes.
+        """
+        super().reset()
+        self.reset_traces()
 
 
 class NonSpikingLIFNode(neuron.LIFNode):
@@ -278,6 +290,10 @@ class NonSpikingLIFNodeWithTrace(NonSpikingLIFNode):
         post = self.post_trace
         return (post.unsqueeze(-1) * pre.unsqueeze(-2)).mean(dim=0)
 
+    def reset(self) -> None:
+        """Reset both the membrane potential and the eligibility traces."""
+        super().reset()
+        self.reset_traces()    
 
 # ----------------------------------------------------------------------
 # Convenience factory functions
