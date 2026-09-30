@@ -48,7 +48,7 @@ References
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -98,11 +98,17 @@ class Actor(nn.Module):
         tau_trace: float = 20.0,
         tau_e: float = 50.0,
         obs_scale: float = 20.0,
+        v_threshold: float = 1.0,
+        output_v_threshold: float = 1.0,
+        init_snn: bool = True,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
         self.num_actions = num_actions
         self.obs_scale = obs_scale
+        self.v_threshold = v_threshold
+        self.output_v_threshold = output_v_threshold
+        self.init_snn = init_snn
 
         layers = []
         prev = obs_dim
@@ -111,6 +117,7 @@ class Actor(nn.Module):
                 TracedLinear(
                     prev, h,
                     tau=tau, tau_trace=tau_trace, tau_e=tau_e,
+                    v_threshold=v_threshold, init_snn=init_snn,
                 )
             )
             prev = h
@@ -119,6 +126,7 @@ class Actor(nn.Module):
             TracedLinear(
                 prev, num_actions,
                 tau=tau, tau_trace=tau_trace, tau_e=tau_e,
+                v_threshold=output_v_threshold, init_snn=init_snn,
             )
         )
         self.layers = nn.ModuleList(layers)
@@ -205,10 +213,14 @@ class Critic(nn.Module):
         tau_trace: float = 20.0,
         tau_e: float = 50.0,
         obs_scale: float = 20.0,
+        v_threshold: float = 1.0,
+        init_snn: bool = True,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
         self.obs_scale = obs_scale
+        self.v_threshold = v_threshold
+        self.init_snn = init_snn
 
         hidden = []
         prev = obs_dim
@@ -217,6 +229,8 @@ class Critic(nn.Module):
                 TracedLinear(
                     prev, h,
                     tau=tau, tau_trace=tau_trace, tau_e=tau_e,
+                    v_threshold=v_threshold,
+                    init_snn=init_snn,
                 )
             )
             prev = h
@@ -309,6 +323,9 @@ class ActorCritic(nn.Module):
         obs_scale: float = 20.0,
         decision_steps: int = 5,
         action_temperature: float = 1.0,
+        v_threshold: float = 1.0,
+        output_v_threshold: float = 1.0,
+        init_snn: bool = True,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -324,6 +341,9 @@ class ActorCritic(nn.Module):
             tau_trace=tau_trace,
             tau_e=tau_e,
             obs_scale=obs_scale,
+            v_threshold=v_threshold,
+            output_v_threshold=output_v_threshold,
+            init_snn=init_snn,
         )
         self.critic = Critic(
             obs_dim=obs_dim,
@@ -332,6 +352,8 @@ class ActorCritic(nn.Module):
             tau_trace=tau_trace,
             tau_e=tau_e,
             obs_scale=obs_scale,
+            v_threshold=v_threshold,
+            init_snn=init_snn,
         )
 
         # Bookkeeping for diagnostics.

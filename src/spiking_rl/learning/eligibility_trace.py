@@ -339,6 +339,8 @@ class TracedLinear(nn.Module):
         tau_trace: float = 20.0,
         tau_e: float = 50.0,
         bias: bool = True,
+        v_threshold: float = 1.0,
+        init_snn: bool = True,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -347,12 +349,17 @@ class TracedLinear(nn.Module):
         self._trace_decay = 1.0 - (1.0 / tau_trace)
 
         self.linear = nn.Linear(in_features, out_features, bias=bias)
-        self.neuron = LIFNodeWithTrace(tau=tau, tau_trace=tau_trace)
+        self.neuron = LIFNodeWithTrace(tau=tau, tau_trace=tau_trace, v_threshold=v_threshold)
         self.eligibility = EligibilityTrace(
             in_features=in_features,
             out_features=out_features,
             tau_e=tau_e,
         )
+        
+        # Apply SNN-specific weight initialization if requested.
+        if init_snn:
+            from spiking_rl.models.initialization import snn_weight_init
+            snn_weight_init(self.linear, v_threshold=v_threshold)
 
         # Pre-synaptic input trace (trace of the linear input x).
         # Lazily initialized on the first forward pass.
