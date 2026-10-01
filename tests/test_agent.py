@@ -186,3 +186,24 @@ def test_invalid_third_factor_raises(env):
     agent = SpikingActorCriticAgent(env, cfg)
     with pytest.raises(ValueError, match="third_factor"):
         agent.train_episode(seed=0)
+        
+def test_balance_actor_weights_bounds_norms(env, config):
+    torch.manual_seed(0)
+    agent = SpikingActorCriticAgent(env, config)
+    # Inflate one actor layer's weights.
+    agent.ac.actor.layers[0].linear.weight.data *= 100.0
+    agent._balance_actor_weights()
+    for layer in agent.ac.actor_layers():
+        norms = layer.linear.weight.norm(dim=1)
+        assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
+
+
+def test_adaptive_threshold_included_in_agent(env, config):
+    from spiking_rl.models.lif import AdaptiveLIFNode
+    torch.manual_seed(0)
+    agent = SpikingActorCriticAgent(env, config)
+    # config.use_adaptive_threshold is True by default
+    for layer in agent.ac.actor_layers():
+        assert isinstance(layer.neuron, AdaptiveLIFNode)
+    for layer in agent.ac.critic_layers():
+        assert isinstance(layer.neuron, AdaptiveLIFNode)

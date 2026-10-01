@@ -219,3 +219,37 @@ def test_positive_and_negative_rewards_push_opposite_directions():
     b_change = block_b.linear.weight - w_original
     assert torch.allclose(a_change, -b_change, atol=1e-6)
     assert a_change.abs().sum().item() > 0.0
+    
+def test_normalize_weights_sets_target_norm():
+    layer = TracedLinear(in_features=8, out_features=4, init_snn=False)
+    layer.linear.weight.data = torch.randn(4, 8) * 10.0  # large weights
+    layer.normalize_weights(target_norm=1.0)
+    norms = layer.linear.weight.norm(dim=1)
+    assert torch.allclose(norms, torch.ones(4), atol=1e-5)
+
+
+def test_weight_norm_diagnostics_shape():
+    layer = TracedLinear(in_features=8, out_features=4)
+    diag = layer.weight_norm_diagnostics()
+    assert "weight_norm_mean" in diag
+    assert "weight_norm_max" in diag
+    assert "weight_norm_min" in diag
+
+
+def test_use_adaptive_false_uses_standard_lif():
+    from spiking_rl.models.lif import LIFNodeWithTrace, AdaptiveLIFNode
+    layer_adaptive = TracedLinear(4, 2, use_adaptive=True)
+    layer_standard = TracedLinear(4, 2, use_adaptive=False)
+    assert isinstance(layer_adaptive.neuron, AdaptiveLIFNode)
+    assert isinstance(layer_standard.neuron, LIFNodeWithTrace)
+    assert not isinstance(layer_standard.neuron, AdaptiveLIFNode)
+    
+def test_traced_linear_handles_batch_shape_changes():
+    """Forward passes with changing batch sizes should not crash."""
+    layer = TracedLinear(in_features=6, out_features=4, init_snn=False)
+    layer(torch.ones(1, 6) * 5.0)
+    layer(torch.ones(64, 6) * 5.0)
+    layer(torch.ones(2, 6) * 5.0)
+    # Eligibility and input trace should still be sane.
+    assert layer.eligibility.eligibility is not None
+    assert layer._input_trace.shape == (2, 6)

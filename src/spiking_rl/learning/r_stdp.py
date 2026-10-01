@@ -187,6 +187,9 @@ class ThreeFactorLearner:
 
         self.use_baseline = bool(use_baseline)
         self.clip_weights = clip_weights
+        self.modulation_baseline = RewardBaseline(
+            alpha=baseline_alpha, initial=0.0
+        )
 
         self.baseline = RewardBaseline(
             alpha=baseline_alpha, initial=baseline_initial
@@ -271,6 +274,17 @@ class ThreeFactorLearner:
 
         self._update_count += 1
         return float(sum(self._last_updates))
+    
+    def apply_modulation_centered(self, modulation: float) -> float:
+        """Apply modulation after subtracting its running mean.
+
+        This centers the learning signal around zero, which prevents
+        systematic weight growth when the raw modulation is biased
+        (as TD error is during the learning phase).
+        """
+        centered = modulation - self.modulation_baseline.value
+        self.modulation_baseline.update(modulation)
+        return self.apply_modulation(centered)
 
     # ------------------------------------------------------------------
     # State management

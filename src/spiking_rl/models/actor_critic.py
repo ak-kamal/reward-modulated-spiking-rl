@@ -101,6 +101,9 @@ class Actor(nn.Module):
         v_threshold: float = 1.0,
         output_v_threshold: float = 1.0,
         init_snn: bool = True,
+        use_adaptive_threshold: bool = True,
+        target_rate: float = 0.1,
+        eta_threshold: float = 1e-3,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -118,6 +121,7 @@ class Actor(nn.Module):
                     prev, h,
                     tau=tau, tau_trace=tau_trace, tau_e=tau_e,
                     v_threshold=v_threshold, init_snn=init_snn,
+                    use_adaptive=use_adaptive_threshold, target_rate=target_rate, eta_threshold=eta_threshold,
                 )
             )
             prev = h
@@ -127,6 +131,7 @@ class Actor(nn.Module):
                 prev, num_actions,
                 tau=tau, tau_trace=tau_trace, tau_e=tau_e,
                 v_threshold=output_v_threshold, init_snn=init_snn,
+                use_adaptive=use_adaptive_threshold, target_rate=target_rate, eta_threshold=eta_threshold,
             )
         )
         self.layers = nn.ModuleList(layers)
@@ -215,6 +220,9 @@ class Critic(nn.Module):
         obs_scale: float = 20.0,
         v_threshold: float = 1.0,
         init_snn: bool = True,
+        use_adaptive_threshold: bool = True,
+        target_rate: float = 0.1,
+        eta_threshold: float = 1e-3,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -231,6 +239,9 @@ class Critic(nn.Module):
                     tau=tau, tau_trace=tau_trace, tau_e=tau_e,
                     v_threshold=v_threshold,
                     init_snn=init_snn,
+                    use_adaptive=use_adaptive_threshold,
+                    target_rate=target_rate,
+                    eta_threshold=eta_threshold,
                 )
             )
             prev = h
@@ -326,6 +337,9 @@ class ActorCritic(nn.Module):
         v_threshold: float = 1.0,
         output_v_threshold: float = 1.0,
         init_snn: bool = True,
+        use_adaptive_threshold: bool = True,
+        target_rate: float = 0.1,
+        eta_threshold: float = 1e-3,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -344,6 +358,9 @@ class ActorCritic(nn.Module):
             v_threshold=v_threshold,
             output_v_threshold=output_v_threshold,
             init_snn=init_snn,
+            use_adaptive_threshold=use_adaptive_threshold,
+            target_rate=target_rate,
+            eta_threshold=eta_threshold,
         )
         self.critic = Critic(
             obs_dim=obs_dim,
@@ -354,6 +371,9 @@ class ActorCritic(nn.Module):
             obs_scale=obs_scale,
             v_threshold=v_threshold,
             init_snn=init_snn,
+            use_adaptive_threshold=use_adaptive_threshold,
+            target_rate=target_rate,
+            eta_threshold=eta_threshold,
         )
 
         # Bookkeeping for diagnostics.

@@ -56,7 +56,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from spiking_rl.models.lif import LIFNodeWithTrace
+from spiking_rl.models.lif import AdaptiveLIFNode, LIFNodeWithTrace
 
 
 # ======================================================================
@@ -341,6 +341,9 @@ class TracedLinear(nn.Module):
         bias: bool = True,
         v_threshold: float = 1.0,
         init_snn: bool = True,
+        use_adaptive: bool = True,
+        target_rate: float = 0.1,
+        eta_threshold: float = 1e-3,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -349,20 +352,30 @@ class TracedLinear(nn.Module):
         self._trace_decay = 1.0 - (1.0 / tau_trace)
 
         self.linear = nn.Linear(in_features, out_features, bias=bias)
-        self.neuron = LIFNodeWithTrace(tau=tau, tau_trace=tau_trace, v_threshold=v_threshold)
+
+        if use_adaptive:
+            self.neuron = AdaptiveLIFNode(
+                tau=tau,
+                tau_trace=tau_trace,
+                v_threshold=v_threshold,
+                target_rate=target_rate,
+                eta_threshold=eta_threshold,
+            )
+        else:
+            self.neuron = LIFNodeWithTrace(
+                tau=tau, tau_trace=tau_trace, v_threshold=v_threshold
+            )
+
         self.eligibility = EligibilityTrace(
             in_features=in_features,
             out_features=out_features,
             tau_e=tau_e,
         )
-        
-        # Apply SNN-specific weight initialization if requested.
+
         if init_snn:
             from spiking_rl.models.initialization import snn_weight_init
             snn_weight_init(self.linear, v_threshold=v_threshold)
 
-        # Pre-synaptic input trace (trace of the linear input x).
-        # Lazily initialized on the first forward pass.
         self._input_trace: torch.Tensor | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -378,6 +391,10 @@ class TracedLinear(nn.Module):
         torch.Tensor
             Spikes of shape ``(batch, out_features)``.
         """
+        # Handle batch-shape changes for the cached input trace.
+        if self._input_trace is not None and self._input_trace.shape != x.shape:
+            self._input_trace = torch.zeros_like(x)
+            
         # Linear pre-activation (input to the neuron).
         pre_current = self.linear(x)
 
@@ -436,6 +453,36 @@ class TracedLinear(nn.Module):
             self.linear.weight.clamp_(-clip_weights, clip_weights)
 
         return float(delta.norm().item())
+    
+    @torch.no_grad()
+    def normalize_weights(self, target_norm: float = 1.0) -> None:
+        """Rescale each output neuron's incoming weight vector to a target L2 norm.
+
+        This implements the "output balancing" mechanism from Skorheim
+        et al. (2014): it prevents any single output neuron from
+        dominating the layer by limiting how large its total incoming
+        weight can grow. Without this, rewarded STDP systematically
+        strengthens a small number of neurons until they saturate.
+
+        Parameters
+        ----------
+        target_norm : float
+            Target L2 norm for each output neuron's weight vector.
+            Default 1.0.
+        """
+        norms = self.linear.weight.norm(dim=1, keepdim=True).clamp_min(1e-8)
+        self.linear.weight.copy_(
+            self.linear.weight * (target_norm / norms)
+        )
+
+    def weight_norm_diagnostics(self) -> dict[str, float]:
+        """Return weight norm statistics for this layer."""
+        norms = self.linear.weight.norm(dim=1)
+        return {
+            "weight_norm_mean": float(norms.mean().item()),
+            "weight_norm_max": float(norms.max().item()),
+            "weight_norm_min": float(norms.min().item()),
+        }
 
     def diagnostics(self) -> dict[str, Any]:
         """Return per-layer diagnostics for debugging."""
@@ -452,3 +499,20 @@ class TracedLinear(nn.Module):
                 self._input_trace.abs().mean().item()
             )
         return info
+    
+    @torch.no_grad()
+    def normalize_weights(self, target_norm: float = 1.0) -> None:
+        """Rescale each output neuron's incoming weight vector to a target L2 norm."""
+        norms = self.linear.weight.norm(dim=1, keepdim=True).clamp_min(1e-8)
+        self.linear.weight.copy_(
+            self.linear.weight * (target_norm / norms)
+        )
+
+    def weight_norm_diagnostics(self) -> dict[str, float]:
+        """Return weight norm statistics for this layer."""
+        norms = self.linear.weight.norm(dim=1)
+        return {
+            "weight_norm_mean": float(norms.mean().item()),
+            "weight_norm_max": float(norms.max().item()),
+            "weight_norm_min": float(norms.min().item()),
+        }

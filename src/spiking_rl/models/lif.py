@@ -116,6 +116,8 @@ class LIFNodeWithTrace(neuron.LIFNode):
         torch.Tensor
             Spike output (0 or 1) with the same shape as ``x``.
         """
+        self._ensure_batch_shape(x)
+        
         # Standard LIF dynamics and spike generation.
         spikes = super().forward(x)
 
@@ -183,6 +185,27 @@ class LIFNodeWithTrace(neuron.LIFNode):
         """
         super().reset()
         self.reset_traces()
+        
+    def _ensure_batch_shape(self, x: torch.Tensor) -> None:
+        """Reinitialize any cached batch-shaped state that no longer matches.
+
+        SpikingJelly caches ``self.v`` across calls, and this class caches
+        ``pre_trace`` and ``post_trace``. Each is created with the batch
+        shape of its first forward call. If a later call has a different
+        batch size, the cached tensors become incompatible with the new
+        input and downstream arithmetic fails. This method reinitializes
+        any such tensor to zeros of the correct shape, which is the
+        semantically correct behavior — the previous batch's state is
+        meaningless for a different batch.
+        """
+        if not isinstance(self.v, torch.Tensor) or self.v.shape != x.shape:
+            self.v = torch.zeros_like(x)
+
+        if self.pre_trace is not None and self.pre_trace.shape != x.shape:
+            self.pre_trace = torch.zeros_like(x)
+
+        if self.post_trace is not None and self.post_trace.shape != x.shape:
+            self.post_trace = torch.zeros_like(x)
 
 
 class NonSpikingLIFNode(neuron.LIFNode):
@@ -293,98 +316,95 @@ class NonSpikingLIFNodeWithTrace(NonSpikingLIFNode):
     def reset(self) -> None:
         """Reset both the membrane potential and the eligibility traces."""
         super().reset()
-        self.reset_traces()    
+        self.reset_traces()
+        
+class AdaptiveLIFNode(LIFNodeWithTrace):
+    """LIF neuron with homeostatic threshold adaptation.
 
-# ----------------------------------------------------------------------
-# Convenience factory functions
-# ----------------------------------------------------------------------
+    The firing threshold slowly rises when the neuron fires more than a
+    target rate and falls when it fires less. This is a well-documented
+    homeostatic mechanism that prevents neurons from becoming permanently
+    silent (a known failure mode in reward-modulated STDP networks).
 
+    The adaptation is deliberately slow (much slower than the membrane
+    time constant) to avoid oscillations, following the principle from
+    the homeostatic plasticity literature that homeostatic processes
+    must operate on a slower timescale than Hebbian plasticity.
 
-def create_lif_layer(
-    in_features: int,
-    out_features: int,
-    tau: float = 2.0,
-    tau_trace: float = 20.0,
-    use_trace: bool = True,
-    **kwargs: Any,
-) -> nn.Sequential:
-    """Create a linear + LIF layer.
-
-    Parameters
+    References
     ----------
-    in_features : int
-        Number of input features.
-    out_features : int
-        Number of output features (neurons in this layer).
-    tau : float
-        Membrane time constant.
-    tau_trace : float
-        Trace decay time constant (used only if ``use_trace=True``).
-    use_trace : bool
-        If True, use ``LIFNodeWithTrace``; otherwise use the standard
-        ``neuron.LIFNode``.
-    **kwargs
-        Additional keyword arguments passed to the neuron.
-
-    Returns
-    -------
-    nn.Sequential
-        A sequential module: ``Linear(in_features, out_features) → LIF``.
+    - Skorheim, Lonjers & Bazhenov (2014), PLoS ONE 9(3): e90821.
+    - Geng & Li (2023), HoSNN, arXiv:2308.10373.
+    - Hertag & Sprekeler (2020), Nature Communications 11:3358.
     """
-    neuron_cls = LIFNodeWithTrace if use_trace else neuron.LIFNode
 
-    if use_trace:
-        lif = neuron_cls(
-            tau=tau, tau_trace=tau_trace, **kwargs
+    def __init__(
+        self,
+        tau: float = 2.0,
+        v_threshold: float = 1.0,
+        tau_trace: float = 20.0,
+        tau_homeo: float = 500.0,
+        target_rate: float = 0.1,
+        eta_threshold: float = 1e-3,
+        threshold_min: float = 0.1,
+        threshold_max: float = 5.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            tau=tau,
+            tau_trace=tau_trace,
+            v_threshold=v_threshold,
+            **kwargs,
         )
-    else:
-        lif = neuron_cls(tau=tau, **kwargs)
+        self.tau_homeo = tau_homeo
+        self.target_rate = target_rate
+        self.eta_threshold = eta_threshold
+        self.threshold_min = threshold_min
+        self.threshold_max = threshold_max
 
-    return nn.Sequential(
-        nn.Linear(in_features, out_features),
-        lif,
-    )
+        # Per-neuron firing-rate estimate, shape (out_features,).
+        # Independent of batch size.
+        self.rate_ema: torch.Tensor | None = None
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with homeostatic threshold adaptation."""
+        # LIFNodeWithTrace.forward handles batch-shape consistency.
+        spikes = super().forward(x)
 
-def create_non_spiking_lif_layer(
-    in_features: int,
-    out_features: int,
-    tau: float = 2.0,
-    tau_trace: float = 20.0,
-    use_trace: bool = False,
-    **kwargs: Any,
-) -> nn.Sequential:
-    """Create a linear + NonSpikingLIF layer for continuous outputs.
+        # Per-neuron firing rate for this batch: average over batch dim.
+        batch_rate = spikes.mean(dim=0)  # shape (out_features,)
 
-    Parameters
-    ----------
-    in_features : int
-        Number of input features.
-    out_features : int
-        Number of output features.
-    tau : float
-        Membrane time constant.
-    tau_trace : float
-        Trace decay time constant (used only if ``use_trace=True``).
-    use_trace : bool
-        If True, use ``NonSpikingLIFNodeWithTrace``; otherwise use
-        ``NonSpikingLIFNode``.
-    **kwargs
-        Additional keyword arguments passed to the neuron.
+        if self.rate_ema is None:
+            self.rate_ema = torch.zeros_like(batch_rate)
 
-    Returns
-    -------
-    nn.Sequential
-        A sequential module: ``Linear(in_features, out_features) → NonSpikingLIF``.
-    """
-    neuron_cls = NonSpikingLIFNodeWithTrace if use_trace else NonSpikingLIFNode
+        # Slow exponential moving average.
+        decay = 1.0 - (1.0 / self.tau_homeo)
+        self.rate_ema = decay * self.rate_ema + (1.0 - decay) * batch_rate
 
-    if use_trace:
-        lif = neuron_cls(tau=tau, tau_trace=tau_trace, **kwargs)
-    else:
-        lif = neuron_cls(tau=tau, **kwargs)
+        # Threshold adaptation: scalar update based on mean firing rate.
+        rate = float(self.rate_ema.mean().item())
+        delta = self.eta_threshold * (rate - self.target_rate)
+        new_threshold = self.v_threshold + delta
+        self.v_threshold = float(
+            max(self.threshold_min, min(self.threshold_max, new_threshold))
+        )
 
-    return nn.Sequential(
-        nn.Linear(in_features, out_features),
-        lif,
-    )
+        return spikes
+
+    def reset(self) -> None:
+        """Reset membrane potential, traces, and rate estimate."""
+        super().reset()
+        if self.rate_ema is not None:
+            self.rate_ema = torch.zeros_like(self.rate_ema)
+
+    def homeostatic_diagnostics(self) -> dict[str, Any]:
+        """Return threshold and rate diagnostics."""
+        info: dict[str, Any] = {
+            "v_threshold": self.v_threshold,
+            "target_rate": self.target_rate,
+            "tau_homeo": self.tau_homeo,
+            "eta_threshold": self.eta_threshold,
+        }
+        if self.rate_ema is not None:
+            info["rate_ema_mean"] = float(self.rate_ema.mean().item())
+        return info

@@ -95,8 +95,15 @@ class AgentConfig:
     critic_lr: float = 1e-3
     third_factor: str = "td_error"  # or "reward_baseline"
     baseline_alpha: float = 0.01
-    clip_weights: float = 5.0
+    clip_weights: float = 2.0
     clip_grad_norm: float = 1.0
+    
+    # --- Homeostatic mechanisms ---
+    use_adaptive_threshold: bool = True
+    target_rate: float = 0.1
+    eta_threshold: float = 1e-3
+    normalize_actor_weights: bool = True
+    weight_norm_target: float = 1.0
 
     # --- Bookkeeping ---
     log_every: int = 10
@@ -152,6 +159,9 @@ class SpikingActorCriticAgent:
             v_threshold=self.config.v_threshold,
             output_v_threshold=self.config.output_v_threshold,
             init_snn=self.config.init_snn,
+            use_adaptive_threshold=self.config.use_adaptive_threshold,
+            target_rate=self.config.target_rate,
+            eta_threshold=self.config.eta_threshold,
         )
 
         # Actor learner uses the actor's traced layers.
@@ -180,6 +190,42 @@ class SpikingActorCriticAgent:
         """Convert a numpy observation to a batched float32 tensor."""
         return torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
 
+    def _balance_actor_weights(self) -> None:
+        """Apply output balancing to all actor layers.
+
+        Rescales each layer's output neuron weight vectors to a target
+        L2 norm after each reward-modulated update. This prevents the
+        rewarded STDP rule from systematically strengthening a small
+        number of output neurons until they dominate the layer.
+        """
+        for layer in self.ac.actor_layers():
+            layer.normalize_weights(target_norm=self.config.weight_norm_target)
+    
+    @torch.no_grad()
+    def greedy_action_diversity(self, n_samples: int = 64) -> int:
+        """Return the number of distinct greedy actions chosen over random observations.
+
+        A value of 1 means the policy is state-invariant (bad).
+        A value close to num_actions means the policy uses all actions (good).
+        """
+        self.ac.reset()
+        
+        observations = []
+        env = self.env
+        obs, _ = env.reset(seed=12345)
+        for _ in range(n_samples):
+            observations.append(obs)
+            action = env.action_space.sample()
+            obs, _, term, trunc, _ = env.step(action)
+            if term or trunc:
+                obs, _ = env.reset(seed=12345 + len(observations))
+
+        obs_batch = torch.as_tensor(np.array(observations), dtype=torch.float32)
+        with torch.no_grad():
+            spike_counts, _ = self.ac.actor(obs_batch, steps=self.config.decision_steps)
+            greedy_actions = spike_counts.argmax(dim=-1)
+        return int(len(greedy_actions.unique()))
+    
     # ------------------------------------------------------------------
     # Episode loops
     # ------------------------------------------------------------------
@@ -234,7 +280,7 @@ class SpikingActorCriticAgent:
 
             # --- Actor update (R-STDP or baseline) ----------------------
             if self.config.third_factor == "td_error":
-                actor_update_norm = self.actor_learner.apply_modulation(
+                actor_update_norm = self.actor_learner.apply_modulation_centered(
                     td_error_value
                 )
             elif self.config.third_factor == "reward_baseline":
@@ -243,6 +289,7 @@ class SpikingActorCriticAgent:
                 raise ValueError(
                     f"Unknown third_factor: {self.config.third_factor}"
                 )
+            self._balance_actor_weights()
 
             # --- Critic update (backprop) -------------------------------
             critic_loss = F.mse_loss(value, td_target.detach())
@@ -268,6 +315,7 @@ class SpikingActorCriticAgent:
                 break
 
         self._total_episodes += 1
+        
 
         return {
             "episode": self._total_episodes,
@@ -281,6 +329,7 @@ class SpikingActorCriticAgent:
             "mean_actor_update": float(np.mean(actor_updates)) if actor_updates else 0.0,
             "mean_critic_loss": float(np.mean(critic_losses)) if critic_losses else 0.0,
             "baseline": float(self.actor_learner.baseline.value),
+            "greedy_action_diversity": self.greedy_action_diversity(),
         }
 
     @torch.no_grad()
@@ -349,12 +398,14 @@ class SpikingActorCriticAgent:
                 mean_spikes = float(np.mean([m["mean_actor_spikes"] for m in recent]))
                 mean_td = float(np.mean([m["mean_td_error"] for m in recent]))
                 mean_upd = float(np.mean([m["mean_actor_update"] for m in recent]))
+                mean_div = float(np.mean([m["greedy_action_diversity"] for m in recent]))
                 print(
                     f"Episode {i + 1:5d}/{n_episodes} | "
                     f"reward={mean_reward:+.3f} | "
                     f"spikes={mean_spikes:8.3f} | "
                     f"td_err={mean_td:+.4f} | "
                     f"act_upd={mean_upd:.4f} | "
+                    f"div={mean_div:.1f} | "
                     f"baseline={self.actor_learner.baseline.value:+.3f}"
                 )
         return history
