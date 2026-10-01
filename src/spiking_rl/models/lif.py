@@ -343,11 +343,11 @@ class AdaptiveLIFNode(LIFNodeWithTrace):
         tau: float = 2.0,
         v_threshold: float = 1.0,
         tau_trace: float = 20.0,
-        tau_homeo: float = 500.0,
+        tau_homeo: float = 2000.0,
         target_rate: float = 0.1,
-        eta_threshold: float = 1e-3,
-        threshold_min: float = 0.1,
-        threshold_max: float = 5.0,
+        eta_threshold: float = 1e-4,
+        threshold_min: float = 0.3,
+        threshold_max: float = 2.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(

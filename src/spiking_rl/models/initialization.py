@@ -99,3 +99,22 @@ def snn_weight_init(
     nn.init.normal_(linear.weight, mean=0.0, std=std)
     if linear.bias is not None:
         nn.init.zeros_(linear.bias)
+        
+def snn_target_weight_norm(v_threshold: float = 1.0) -> float:
+    """Return the per-row L2 norm produced by SNN weight initialization.
+
+    For a Linear layer with in_features=n and firing threshold θ, the
+    Micheli et al. (2025) initialization sets per-weight std to
+    sqrt(1 / (n * P(u > θ))). The per-row L2 norm is therefore:
+
+        sqrt(n) * sqrt(1 / (n * P(u > θ))) = sqrt(1 / P(u > θ))
+
+    which is independent of n. For θ=1.0 this is ≈ 2.51.
+
+    This is the natural target for output balancing: it lets weights
+    vary in *direction* (which is what learning should change) while
+    preventing runaway growth in *magnitude*.
+    """
+    from scipy.stats import norm as _norm
+    p_above = _norm.sf(v_threshold)
+    return float((1.0 / p_above) ** 0.5)

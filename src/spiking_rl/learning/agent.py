@@ -58,6 +58,7 @@ import torch.nn.functional as F
 
 from spiking_rl.learning.r_stdp import ThreeFactorLearner
 from spiking_rl.models.actor_critic import ActorCritic
+from spiking_rl.models.initialization import snn_target_weight_norm
 
 
 # ======================================================================
@@ -101,7 +102,7 @@ class AgentConfig:
     # --- Homeostatic mechanisms ---
     use_adaptive_threshold: bool = True
     target_rate: float = 0.1
-    eta_threshold: float = 1e-3
+    eta_threshold: float = 1e-4
     normalize_actor_weights: bool = True
     weight_norm_target: float = 1.0
 
@@ -196,11 +197,21 @@ class SpikingActorCriticAgent:
         Rescales each layer's output neuron weight vectors to a target
         L2 norm after each reward-modulated update. This prevents the
         rewarded STDP rule from systematically strengthening a small
-        number of output neurons until they dominate the layer.
+        number of output neurons until they dominate the layer. The output layer 
+        is excluded because normalizing its weights to
+        a fixed L2 norm suppresses the drive needed to reach threshold
+        when the preceding hidden layer has many neurons. Hidden layers
+        still benefit from balancing to prevent representational collapse. The target 
+        L2 norm matches what the SNN-specific initialization
+        would produce, so balancing constrains weight *drift* without
+        fighting the initialization. The output layer is excluded
+        because its magnitude directly controls whether it can reach
+        threshold.
         """
-        for layer in self.ac.actor_layers():
-            layer.normalize_weights(target_norm=self.config.weight_norm_target)
-    
+        target = snn_target_weight_norm(v_threshold=1.0)  # ≈ 2.51
+        for layer in self.ac.actor_layers()[:-1]:
+            layer.normalize_weights(target_norm=target)
+
     @torch.no_grad()
     def greedy_action_diversity(self, n_samples: int = 64) -> int:
         """Return the number of distinct greedy actions chosen over random observations.
@@ -399,6 +410,10 @@ class SpikingActorCriticAgent:
                 mean_td = float(np.mean([m["mean_td_error"] for m in recent]))
                 mean_upd = float(np.mean([m["mean_actor_update"] for m in recent]))
                 mean_div = float(np.mean([m["greedy_action_diversity"] for m in recent]))
+                layer_rates = self.layer_firing_rates()
+                rate_str = " ".join(
+                    f"r{i}={v:.3f}" for i, v in enumerate(layer_rates.values())
+                )
                 print(
                     f"Episode {i + 1:5d}/{n_episodes} | "
                     f"reward={mean_reward:+.3f} | "
@@ -406,6 +421,7 @@ class SpikingActorCriticAgent:
                     f"td_err={mean_td:+.4f} | "
                     f"act_upd={mean_upd:.4f} | "
                     f"div={mean_div:.1f} | "
+                    f"{rate_str} | "
                     f"baseline={self.actor_learner.baseline.value:+.3f}"
                 )
         return history
@@ -435,8 +451,31 @@ class SpikingActorCriticAgent:
 
     def diagnostics(self) -> dict[str, Any]:
         """Return a diagnostic dict for the current state of the agent."""
+        # Per-layer threshold and weight-norm summaries.
+        actor_layer_info = []
+        for layer in self.ac.actor_layers():
+            info = {
+                "v_threshold": float(getattr(layer.neuron, "v_threshold", None) or 0.0),
+                "weight_norm_mean": float(
+                    layer.linear.weight.norm(dim=1).mean().item()
+                ),
+            }
+            actor_layer_info.append(info)
         return {
             "total_episodes": self._total_episodes,
             "actor_learner": self.actor_learner.diagnostics(),
             "network": self.ac.diagnostics(),
+            "actor_layers": actor_layer_info,
         }
+        
+    @torch.no_grad()
+    def layer_firing_rates(self) -> dict[str, float]:
+        """Return per-layer mean firing rates for the actor (in spikes/step)."""
+        rates = {}
+        for i, layer in enumerate(self.ac.actor_layers()):
+            rate_ema = getattr(layer.neuron, "rate_ema", None)
+            if rate_ema is not None:
+                rates[f"layer_{i}"] = float(rate_ema.mean().item())
+            else:
+                rates[f"layer_{i}"] = 0.0
+        return rates

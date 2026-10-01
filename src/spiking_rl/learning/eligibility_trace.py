@@ -360,6 +360,9 @@ class TracedLinear(nn.Module):
                 v_threshold=v_threshold,
                 target_rate=target_rate,
                 eta_threshold=eta_threshold,
+                tau_homeo=2000.0,
+                threshold_max=2.0,
+                threshold_min=0.3,
             )
         else:
             self.neuron = LIFNodeWithTrace(
