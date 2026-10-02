@@ -1,0 +1,7 @@
+Policy,Mean reward,Success rate,Mean steps
+random,-0.15120000000000045,0.54,71.68
+BFS-optimal,0.9299999999999998,1.0,8.0
+Tabular Q,0.9300000000000002,1.0,8.0
+DQN,0.9300000000000002,1.0,8.0
+PPO (sampled),0.9196,1.0,9.04
+SNN (sampled),0.91,1.0,10.0

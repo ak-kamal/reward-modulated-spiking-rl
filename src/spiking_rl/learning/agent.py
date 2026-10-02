@@ -89,6 +89,7 @@ class AgentConfig:
     output_v_threshold: float = 1.0
     init_snn: bool = True
     decision_steps: int = 5
+    eval_decision_steps: int | None = None
     action_temperature: float = 1.0
 
     # --- Learning ---
@@ -221,6 +222,9 @@ class SpikingActorCriticAgent:
         """
         self.ac.reset()
         
+        # Use eval resolution for diversity measurement too.
+        steps = self.config.eval_decision_steps or self.config.decision_steps
+
         observations = []
         env = self.env
         obs, _ = env.reset(seed=12345)
@@ -233,7 +237,7 @@ class SpikingActorCriticAgent:
 
         obs_batch = torch.as_tensor(np.array(observations), dtype=torch.float32)
         with torch.no_grad():
-            spike_counts, _ = self.ac.actor(obs_batch, steps=self.config.decision_steps)
+            spike_counts, _ = self.ac.actor(obs_batch, steps=steps)
             greedy_actions = spike_counts.argmax(dim=-1)
         return int(len(greedy_actions.unique()))
     
@@ -351,35 +355,52 @@ class SpikingActorCriticAgent:
     ) -> dict[str, Any]:
         """Run one evaluation episode without any learning.
 
-        The network still runs forward passes (updating eligibility
-        traces), but no weight updates are applied.
+        Uses `config.eval_decision_steps` if set, otherwise falls back to
+        `config.decision_steps`. Adaptive thresholds are frozen during
+        evaluation so that a different number of internal steps doesn't
+        perturb the learned homeostatic state.
         """
         obs, _ = self.env.reset(seed=seed)
         obs_t = self._to_tensor(obs)
 
         self.ac.reset()
 
-        episode_reward = 0.0
-        episode_steps = 0
-        terminated = False
-        truncated = False
+        # Choose eval-time decision steps.
+        steps = self.config.eval_decision_steps or self.config.decision_steps
 
-        for step in range(10_000):
-            if greedy:
-                action, _ = self.ac.greedy_action(obs_t)
-            else:
-                action, _, _ = self.ac.sample_action(obs_t)
+        # Freeze adaptive thresholds during evaluation.
+        frozen = []
+        for module in self.ac.modules():
+            if hasattr(module, "eta_threshold"):
+                frozen.append((module, module.eta_threshold))
+                module.eta_threshold = 0.0
 
-            next_obs, reward, terminated, truncated, _ = self.env.step(
-                int(action.item())
-            )
-            done = bool(terminated or truncated)
-            episode_reward += reward
-            episode_steps += 1
+        try:
+            episode_reward = 0.0
+            episode_steps = 0
+            terminated = False
+            truncated = False
 
-            obs_t = self._to_tensor(next_obs)
-            if done:
-                break
+            for step in range(10_000):
+                if greedy:
+                    action, _ = self.ac.greedy_action(obs_t, steps=steps)
+                else:
+                    action, _, _ = self.ac.sample_action(obs_t, steps=steps)
+
+                next_obs, reward, terminated, truncated, _ = self.env.step(
+                    int(action.item())
+                )
+                done = bool(terminated or truncated)
+                episode_reward += reward
+                episode_steps += 1
+
+                obs_t = self._to_tensor(next_obs)
+                if done:
+                    break
+        finally:
+            # Restore thresholds regardless of outcome.
+            for module, eta in frozen:
+                module.eta_threshold = eta
 
         return {
             "total_reward": float(episode_reward),

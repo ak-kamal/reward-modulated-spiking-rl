@@ -1,0 +1,6 @@
+{
+  "mean_reward": 0.91,
+  "success_rate": 1.0,
+  "mean_steps": 10.0,
+  "n_episodes": 100
+}
