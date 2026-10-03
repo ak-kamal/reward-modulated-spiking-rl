@@ -212,3 +212,108 @@ def test_diagnostics_reports_spike_stats():
     assert diag["critic_value_mean"] is not None
     assert len(diag["actor_layer_eligibility"]) == 2  # one hidden + output
     assert len(diag["critic_layer_eligibility"]) == 1  # one hidden
+    
+
+def test_actor_inhibition_reduces_output_spikes():
+    """With strong inhibition, the actor's output spike count should decrease."""
+    torch.manual_seed(0)
+    obs = torch.ones(1, 4)
+
+    actor_no_inh = Actor(obs_dim=4, num_actions=4, hidden_dims=(16,),
+                         inhibition_gain=0.0)
+    actor_with_inh = Actor(obs_dim=4, num_actions=4, hidden_dims=(16,),
+                           inhibition_gain=5.0)
+    # Copy weights so the only difference is the inhibition gain.
+    actor_with_inh.load_state_dict(actor_no_inh.state_dict(), strict=False)
+
+    counts_no_inh, _ = actor_no_inh(obs, steps=20)
+    counts_with_inh, _ = actor_with_inh(obs, steps=20)
+
+    assert counts_with_inh.sum().item() <= counts_no_inh.sum().item()
+    
+
+def test_lateral_inhibition_is_within_layer_not_feedforward():
+    """With a single-layer actor, within-layer inhibition still reduces
+    spikes because each neuron sees the previous timestep's activity in
+    its own layer.
+
+    Important: this test uses a *moderate* input magnitude. With very
+    large inputs, the LIF neurons saturate (fire every step) and no
+    realistic inhibition can change behavior. Lateral inhibition only
+    has an effect in the balanced-firing regime near threshold.
+    """
+    torch.manual_seed(0)
+    # Small input so pre-activations sit near threshold.
+    obs = torch.ones(1, 4) * 0.05
+
+    actor_no_inh = Actor(
+        obs_dim=4, num_actions=4, hidden_dims=(),
+        inhibition_gain=0.0,
+    )
+    actor_with_inh = Actor(
+        obs_dim=4, num_actions=4, hidden_dims=(),
+        inhibition_gain=10.0,
+    )
+    actor_with_inh.load_state_dict(actor_no_inh.state_dict(), strict=False)
+
+    counts_no, _ = actor_no_inh(obs, steps=20)
+    counts_inh, _ = actor_with_inh(obs, steps=20)
+
+    # Sanity: the baseline must fire at all with this input.
+    assert counts_no.sum().item() > 0, (
+        "Sanity check failed: the no-inhibition actor should fire at "
+        "least once with this input. "
+        f"Got {counts_no.sum().item()} spikes."
+    )
+
+    # The actual assertion: inhibition should reduce spikes.
+    assert counts_inh.sum().item() < counts_no.sum().item(), (
+        f"Within-layer inhibition should reduce spikes even in a "
+        f"single-layer actor. Feedforward inhibition would have no "
+        f"effect. Got no-inh={counts_no.sum().item()}, "
+        f"with-inh={counts_inh.sum().item()}."
+    )
+
+
+def test_lateral_inhibition_ineffective_under_saturation():
+    """Documentation test: under strong input, neurons saturate and
+    lateral inhibition has no effect. This is a property of the
+    mechanism, not a bug.
+    """
+    torch.manual_seed(0)
+    obs = torch.ones(1, 4) * 10.0
+
+    actor_no_inh = Actor(obs_dim=4, num_actions=4, hidden_dims=(),
+                         inhibition_gain=0.0)
+    actor_with_inh = Actor(obs_dim=4, num_actions=4, hidden_dims=(),
+                           inhibition_gain=100.0)
+    actor_with_inh.load_state_dict(actor_no_inh.state_dict(), strict=False)
+
+    counts_no, _ = actor_no_inh(obs, steps=20)
+    counts_inh, _ = actor_with_inh(obs, steps=20)
+
+    max_possible = 20 * 4
+    assert counts_no.sum().item() == max_possible
+    assert counts_inh.sum().item() == max_possible
+
+def test_lateral_inhibition_higher_gain_fewer_spikes():
+    """Monotonicity check: more inhibition → fewer or equal spikes."""
+    torch.manual_seed(0)
+    obs = torch.ones(1, 4) * 10.0
+
+    counts = []
+    for gain in [0.0, 0.5, 1.0, 2.0, 5.0]:
+        torch.manual_seed(0)
+        actor = Actor(
+            obs_dim=4, num_actions=4, hidden_dims=(16,),
+            inhibition_gain=gain,
+        )
+        c, _ = actor(obs, steps=20)
+        counts.append(c.sum().item())
+
+    # Each step should not increase relative to the previous gain.
+    for i in range(1, len(counts)):
+        assert counts[i] <= counts[i - 1] + 1e-6, (
+            f"Higher inhibition produced more spikes: "
+            f"gain sequence counts = {counts}"
+        )

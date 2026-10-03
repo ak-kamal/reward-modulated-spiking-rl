@@ -104,6 +104,7 @@ class Actor(nn.Module):
         use_adaptive_threshold: bool = True,
         target_rate: float = 0.1,
         eta_threshold: float = 1e-3,
+        inhibition_gain: float = 0.0,
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -112,6 +113,7 @@ class Actor(nn.Module):
         self.v_threshold = v_threshold
         self.output_v_threshold = output_v_threshold
         self.init_snn = init_snn
+        self.inhibition_gain = inhibition_gain
 
         layers = []
         prev = obs_dim
@@ -143,33 +145,52 @@ class Actor(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the actor for ``steps`` internal time steps.
 
-        Parameters
-        ----------
-        obs : torch.Tensor
-            Shape ``(batch, obs_dim)``.
-        steps : int
-            Number of internal time steps per decision.
+        If ``inhibition_gain > 0``, each layer receives a subtractive
+        inhibitory current derived from its **own** spikes at the
+        previous internal timestep. This is the winner-take-all
+        formulation from Oster, Douglas & Liu (2009) and LISNN
+        (Yang et al., IJCAI 2020): all neurons in a layer compete via a
+        shared inhibitory signal equal to the layer's mean activity.
 
-        Returns
-        -------
-        spike_counts : torch.Tensor
-            Shape ``(batch, num_actions)``. Total spikes per output
-            neuron over the ``steps`` internal steps.
-        last_spikes : torch.Tensor
-            Shape ``(batch, num_actions)``. Spikes at the final step.
+        Contrast with feedforward inhibition, where a layer's current is
+        reduced by the *previous* layer's activity. Feedforward inhibition
+        suppresses downstream layers wholesale; lateral inhibition
+        creates within-layer competition and sparser codes.
         """
         if steps <= 0:
             raise ValueError(f"steps must be positive, got {steps}")
 
         x = obs * self.obs_scale
+        n_layers = len(self.layers)
+
+        # Per-layer spikes from the previous internal timestep.
+        # Initialized to None so the first timestep of each decision
+        # window has no inhibition (there is no history yet).
+        layer_prev_spikes: list[torch.Tensor | None] = [None] * n_layers
+
         spike_counts: torch.Tensor | None = None
         last_spikes: torch.Tensor | None = None
+
         for _ in range(steps):
             h = x
-            for layer in self.layers:
-                h = layer(h)
+            for i, layer in enumerate(self.layers):
+                inhibition = None
+                if (
+                    layer_prev_spikes[i] is not None
+                    and self.inhibition_gain > 0.0
+                ):
+                    # Mean activity of this same layer at the previous
+                    # timestep, broadcast to every neuron in the layer.
+                    mean_prev = layer_prev_spikes[i].mean(dim=-1, keepdim=True)
+                    inhibition = self.inhibition_gain * mean_prev.expand(
+                        -1, layer.out_features
+                    )
+                h = layer(h, inhibition=inhibition)
+                layer_prev_spikes[i] = h.detach()
+
             last_spikes = h
             spike_counts = h if spike_counts is None else spike_counts + h
+
         return spike_counts, last_spikes
 
     def reset(self) -> None:
@@ -340,6 +361,7 @@ class ActorCritic(nn.Module):
         use_adaptive_threshold: bool = True,
         target_rate: float = 0.1,
         eta_threshold: float = 1e-3,
+        inhibition_gain: float = 0.0
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
@@ -361,6 +383,7 @@ class ActorCritic(nn.Module):
             use_adaptive_threshold=use_adaptive_threshold,
             target_rate=target_rate,
             eta_threshold=eta_threshold,
+            inhibition_gain=inhibition_gain
         )
         self.critic = Critic(
             obs_dim=obs_dim,

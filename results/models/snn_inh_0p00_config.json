@@ -1,0 +1,16 @@
+{
+  "actor_hidden": [
+    64,
+    64
+  ],
+  "critic_hidden": [
+    64,
+    64
+  ],
+  "decision_steps": 5,
+  "eval_decision_steps": 20,
+  "obs_scale": 20.0,
+  "v_threshold": 1.0,
+  "output_v_threshold": 1.0,
+  "inhibition_gain": 0.0
+}

@@ -253,3 +253,35 @@ def test_traced_linear_handles_batch_shape_changes():
     # Eligibility and input trace should still be sane.
     assert layer.eligibility.eligibility is not None
     assert layer._input_trace.shape == (2, 6)
+    
+def test_traced_linear_inhibition_reduces_spikes():
+    """Higher inhibition should produce fewer or equal spikes."""
+    torch.manual_seed(0)
+    layer = TracedLinear(8, 4, init_snn=True)
+    x = torch.ones(1, 8) * 10.0
+
+    # No inhibition.
+    layer.reset()
+    spikes_no_inh = layer(x).sum().item()
+
+    # Strong inhibition.
+    layer.reset()
+    inhibition = torch.ones(1, 4) * 5.0
+    spikes_with_inh = layer(x, inhibition=inhibition).sum().item()
+
+    assert spikes_with_inh <= spikes_no_inh
+
+
+def test_traced_linear_none_inhibition_equals_no_inhibition():
+    """Passing inhibition=None must equal the original forward behavior."""
+    torch.manual_seed(0)
+    layer = TracedLinear(8, 4, init_snn=True)
+    x = torch.ones(1, 8) * 10.0
+
+    layer.reset()
+    spikes_none = layer(x, inhibition=None).clone()
+
+    layer.reset()
+    spikes_default = layer(x).clone()
+
+    assert torch.equal(spikes_none, spikes_default)

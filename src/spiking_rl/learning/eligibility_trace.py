@@ -381,31 +381,42 @@ class TracedLinear(nn.Module):
 
         self._input_trace: torch.Tensor | None = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass: linear -> LIF, and update the eligibility trace.
+    def forward(
+        self,
+        x: torch.Tensor,
+        inhibition: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass with optional lateral inhibition.
 
         Parameters
         ----------
         x : torch.Tensor
             Input of shape ``(batch, in_features)``.
+        inhibition : torch.Tensor or None
+            Optional inhibitory current of shape ``(batch, out_features)``
+            to subtract from the linear pre-activation. When None (the
+            default), behavior is identical to the original forward pass.
 
         Returns
         -------
         torch.Tensor
             Spikes of shape ``(batch, out_features)``.
         """
-        # Handle batch-shape changes for the cached input trace.
+        # Handle batch-shape changes for cached state.
         if self._input_trace is not None and self._input_trace.shape != x.shape:
             self._input_trace = torch.zeros_like(x)
-            
-        # Linear pre-activation (input to the neuron).
-        pre_current = self.linear(x)
 
-        # Spiking dynamics. Also updates the neuron's post_trace.
-        spikes = self.neuron(pre_current)
+        # Linear pre-activation.
+        pre = self.linear(x)
 
-        # Maintain the input trace ourselves, using x directly.
-        # Detach to avoid holding the graph across steps.
+        # Apply lateral inhibition if provided.
+        if inhibition is not None:
+            pre = pre - inhibition
+
+        # Spiking dynamics.
+        spikes = self.neuron(pre)
+
+        # Input trace.
         x_detached = x.detach()
         if self._input_trace is None:
             self._input_trace = torch.zeros_like(x_detached)
@@ -414,10 +425,8 @@ class TracedLinear(nn.Module):
             + (1.0 - self._trace_decay) * x_detached
         )
 
-        # Eligibility update: outer(input_trace, post_trace).
-        self.eligibility.update(
-            self._input_trace, self.neuron.post_trace
-        )
+        # Eligibility update.
+        self.eligibility.update(self._input_trace, self.neuron.post_trace)
 
         return spikes
 

@@ -6,9 +6,9 @@ sparsity–performance–robustness trade-offs emerge.
 
 ## Status
 
-🚧 **In development.** Core pipeline implemented, trained, and evaluated.
-Baselines (Tabular Q, DQN, PPO) and the noise-robustness study are complete.
-Sparsity experiments and ablation studies are next.
+🚧 **In development.** Core pipeline, baselines, noise-robustness study, and
+sparsity experiments are complete. Ablation studies (eligibility-trace
+contribution and architecture depth) are next.
 
 ## Research Question
 
@@ -46,7 +46,10 @@ updates follow the three-factor rule:
 
     Δw = lr × modulation × E
 
-where `modulation` is the centered temporal-difference error.
+where `modulation` is the centered temporal-difference error. Optional
+within-layer lateral inhibition can be applied to each layer's input current
+based on its own previous-timestep activity (the winner-take-all formulation
+from Oster et al., 2009).
 
 ### Critic — spiking hidden layers, non-spiking output, backprop
 
@@ -73,9 +76,10 @@ for movement, boundaries, termination, noise statistics, and reproducibility.
 ## Empirical Findings
 
 The training pipeline required four fixes, each grounded in published work and
-verified empirically. The noise-robustness study then produced one additional
-finding. We document them because they reflect real constraints of
-reward-modulated spiking RL that are not always obvious from the literature.
+verified empirically. The follow-up studies (noise robustness and sparsity)
+produced two additional findings. We document them because they reflect real
+constraints of reward-modulated spiking RL that are not always obvious from the
+literature.
 
 ### Finding 1: Dense reward shaping is required
 
@@ -158,9 +162,40 @@ observation. This mechanism helps against short-timescale input perturbations
 but not against systematic action-execution failures (transition noise), which
 is why the advantage is specific to observation noise.
 
-This is a more nuanced result than a simple "stochastic is better" claim, and
-it is consistent with the low-pass-filter interpretation of spike-count
-integration.
+### Finding 6: Lateral inhibition produces a weak sparsity trade-off
+
+We added a within-layer lateral inhibition mechanism (winner-take-all
+competition; Oster et al., 2009) and swept the inhibition gain across
+`{0.0, 0.25, 0.5, 1.0, 1.5, 2.0}`, training a fresh SNN at each level. We
+measured sparsity as spikes per output neuron per decision step over
+actual policy rollouts.
+
+**Result:** Across the five configurations that converged (excluding one
+training-variance outlier at gain=1.0), increasing the inhibition gain from
+0.0 to 1.5 reduced spike count by ~1.4% (2.533 → 2.498 spikes/neuron/step),
+at the cost of ~6.8% longer paths (10.17 → 10.86 steps) and ~0.8% reward
+reduction. The Pareto front is shallow.
+
+**Why the trade-off is weak:** The adaptive-threshold homeostasis introduced
+in Finding 3 partially compensates for the inhibitory drive. When inhibition
+reduces a neuron's pre-activation, the neuron fires less, and the homeostatic
+threshold lowers itself to restore the target firing rate. Over training,
+the thresholds equilibrate at values that cancel most of the inhibition.
+The residual trade-off is what survives after homeostatic compensation.
+
+**Greedy readout:** Lateral inhibition did **not** fix the greedy readout
+collapse. The `div` metric stayed at 1.0 and greedy success remained 0%
+across all inhibition levels. The winner-take-all competition hypothesis
+is not supported by this result.
+
+**Observation-noise robustness:** We re-evaluated the gain=1.50 SNN under
+the observation-noise sweep and compared to the no-inhibition SNN. The
+inhibited model achieved consistently lower step counts (9.86–10.17 vs.
+10.18–10.54, averaging ~0.4 steps lower) across all noise levels. We do
+not claim this is caused by the inhibition mechanism, since the two models
+were trained with a single seed each and the difference could reflect
+run-to-run training variance. The defensible conclusion is that inhibition
+did **not** degrade observation-noise robustness.
 
 ## Key Design Decisions
 
@@ -203,14 +238,13 @@ Adaptive threshold and output balancing are included based on the Skorheim
 et al. (2014) and Sanda et al. (2017) findings that reward-modulated STDP
 requires homeostatic regulation to prevent both silent and saturated regimes.
 
-### Sparsity mechanism (planned)
+### Lateral inhibition
 
-Lateral inhibition is the planned sparsity mechanism for the trade-off
-experiments. Q1 literature (2024 *Biomimetics*; 2013 *PLoS Comp Biol*) supports
-lateral inhibition as a primary driver of sparse cortical codes. The trade-off
-analysis follows the spirit of Bacho & Chu (2023), which established that
-maximum sparsity is not optimal for supervised SNNs — we extend this question
-to reward-modulated spiking RL.
+Within-layer subtractive inhibition, applied to each layer's input current
+based on its own previous-timestep activity. The implementation follows the
+winner-take-all formulation from Oster, Douglas & Liu (2009) and the LISNN
+model (Yang et al., IJCAI 2020). The inhibition gain defaults to 0.0, so the
+baseline architecture is unaffected when the mechanism is disabled.
 
 ## Results Summary
 
@@ -243,8 +277,23 @@ The SNN matches the success rate of the conventional baselines while using
 The SNN is measurably more robust to observation noise, equally affected by
 transition noise, and unaffected by reward noise (as expected).
 
-## Repository Structure
+### Sparsity trade-off (spikes per neuron per step vs. task efficiency)
 
+| Inhibition gain | Spikes/neuron/step | Mean steps | Mean reward |
+|-----------------|--------------------|-----------:|------------:|
+| 0.00 | 2.533 | 10.17 | 0.908 |
+| 0.25 | 2.520 | 10.38 | 0.906 |
+| 0.50 | 2.500 | 10.37 | 0.906 |
+| 1.50 | 2.498 | 10.86 | 0.901 |
+| 2.00 | 2.500 | 10.55 | 0.905 |
+
+Lateral inhibition produces a shallow, monotonic sparsity–performance
+trade-off. Adaptive-threshold homeostasis absorbs most of the inhibitory
+drive, leaving only a ~1.4% spike reduction at a ~6.8% efficiency cost.
+No configuration meaningfully improves over the no-inhibition baseline on
+either axis, and none fixes the greedy-readout collapse.
+
+## Repository Structure
 src/spiking_rl/
 ├── environment/ # Gridworld + noise mechanisms
 ├── models/ # LIF neurons, SNN weight init, actor-critic
@@ -260,11 +309,10 @@ results/ # Figures and metrics
 
 ## Experiments (Planned)
 
-1. **Sparsity–performance trade-off.** Sweep the lateral-inhibition gain and
-   measure spikes per episode against success rate (Pareto curve).
-2. **Eligibility-trace ablation.** Compare the full three-factor rule against
-   immediate reward-modulated STDP without traces.
-3. **Architecture ablation.** Compare 1 vs 2 hidden layers, following the
+1. **Eligibility-trace ablation.** Compare the full three-factor rule against
+   immediate reward-modulated STDP without traces, to isolate the trace's
+   contribution to delayed-reward learning.
+2. **Architecture ablation.** Compare 1 vs 2 hidden layers, following the
    Zanatta et al. (2024) finding that shallower SNN-RL topologies perform better.
 
 ## What This Project Does Not Claim
@@ -276,6 +324,10 @@ results/ # Figures and metrics
   counts, not measured hardware energy.
 - The gridworld is a controlled toy environment, appropriate for the focused
   research question but not a benchmark for real-world tasks.
+- The sparsity–performance trade-off is **shallow** in our setup. We do not
+  claim that lateral inhibition is an effective sparsity mechanism for
+  reward-modulated spiking RL; our result is that homeostatic compensation
+  largely negates it.
 
 ## References
 
@@ -303,6 +355,8 @@ results/ # Figures and metrics
   initialization in spiking neural networks. *IEEE*.
 - Mnih, V. et al. (2015). Human-level control through deep reinforcement
   learning. *Nature*, 518, 529–533.
+- Oster, M., Douglas, R., & Liu, S.-C. (2009). Computation with spikes in a
+  winner-take-all network. *Neural Computation*, 21(9), 2437–2465.
 - Potjans, W., Diesmann, M., & Morrison, A. (2011). A spiking neural network
   model of an actor-critic learning agent. *Neural Computation*, 23(2), 269–328.
 - Sanda, P., Skorheim, S., & Bazhenov, M. (2017). Multi-layer network utilizing
@@ -315,6 +369,8 @@ results/ # Figures and metrics
 - Sun, Zeng & Li (2022). Solving the spike feature information vanishing problem
   in spiking deep Q network with potential based normalization. *Frontiers in
   Neuroscience*.
+- Yang, Q. et al. (2020). LISNN: Improving Spiking Neural Networks with Lateral
+  Interactions. *IJCAI*.
 - Zanatta, L. et al. (2024). Comparing SNNs and ANNs for deep reinforcement
   learning. *Scientific Reports*.
 

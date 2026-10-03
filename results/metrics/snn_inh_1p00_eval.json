@@ -1,0 +1,11 @@
+{
+  "inhibition_gain": 1.0,
+  "mean_reward": 0.6925999999999999,
+  "success_rate": 0.99,
+  "mean_steps": 30.73,
+  "greedy_success_rate": 0.0,
+  "greedy_mean_reward": -1.0000000000000004,
+  "greedy_action_diversity": 1,
+  "spikes_per_step": 3.75,
+  "train_time_s": 968.67915558815
+}

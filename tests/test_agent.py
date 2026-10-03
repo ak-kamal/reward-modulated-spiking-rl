@@ -219,3 +219,42 @@ def test_adaptive_threshold_included_in_agent(env, config):
         assert isinstance(layer.neuron, AdaptiveLIFNode)
     for layer in agent.ac.critic_layers():
         assert isinstance(layer.neuron, AdaptiveLIFNode)
+        
+
+def test_measure_sparsity_returns_positive_value(env, config):
+    """Sparsity measurement should return positive spikes."""
+    torch.manual_seed(0)
+    agent = SpikingActorCriticAgent(env, config)
+    result = agent.measure_sparsity(n_episodes=5, seed_start=0)
+    assert result["spikes_per_step"] > 0
+    assert result["spikes_per_neuron_per_step"] > 0
+    assert result["spikes_per_neuron_per_step"] == pytest.approx(
+        result["spikes_per_step"] / agent.ac.actor.num_actions
+    )
+
+
+def test_measure_sparsity_reflects_inhibition_gain(env):
+    """Higher inhibition should produce lower sparsity measure."""
+    from spiking_rl.learning.agent import AgentConfig
+    torch.manual_seed(0)
+    cfg_no_inh = AgentConfig(
+        actor_hidden=(16,), critic_hidden=(16,),
+        decision_steps=3, inhibition_gain=0.0,
+    )
+    cfg_with_inh = AgentConfig(
+        actor_hidden=(16,), critic_hidden=(16,),
+        decision_steps=3, inhibition_gain=5.0,
+    )
+    agent_no = SpikingActorCriticAgent(env, cfg_no_inh)
+    agent_inh = SpikingActorCriticAgent(env, cfg_with_inh)
+    # Use the same weights so the only difference is inhibition.
+    agent_inh.ac.load_state_dict(agent_no.ac.state_dict())
+
+    s_no = agent_no.measure_sparsity(n_episodes=5, seed_start=0)
+    s_inh = agent_inh.measure_sparsity(n_episodes=5, seed_start=0)
+
+    assert s_inh["spikes_per_neuron_per_step"] <= s_no["spikes_per_neuron_per_step"], (
+        f"Inhibition did not reduce sparsity: "
+        f"no_inh={s_no['spikes_per_neuron_per_step']}, "
+        f"inh={s_inh['spikes_per_neuron_per_step']}"
+    )

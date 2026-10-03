@@ -106,6 +106,9 @@ class AgentConfig:
     eta_threshold: float = 1e-4
     normalize_actor_weights: bool = True
     weight_norm_target: float = 1.0
+    
+    # --- Sparsity mechanism ---
+    inhibition_gain: float = 0.0
 
     # --- Bookkeeping ---
     log_every: int = 10
@@ -164,6 +167,7 @@ class SpikingActorCriticAgent:
             use_adaptive_threshold=self.config.use_adaptive_threshold,
             target_rate=self.config.target_rate,
             eta_threshold=self.config.eta_threshold,
+            inhibition_gain=self.config.inhibition_gain,
         )
 
         # Actor learner uses the actor's traced layers.
@@ -241,6 +245,57 @@ class SpikingActorCriticAgent:
             greedy_actions = spike_counts.argmax(dim=-1)
         return int(len(greedy_actions.unique()))
     
+    @torch.no_grad()
+    def measure_sparsity(
+        self,
+        n_episodes: int = 50,
+        seed_start: int = 10_000,
+        greedy: bool = False,
+    ) -> dict[str, float]:
+        """Measure spikes per step during actual policy rollouts.
+
+        Returns a dict with:
+
+        - ``spikes_per_step``: total spikes summed across output neurons,
+          averaged over decision steps.
+        - ``spikes_per_neuron_per_step``: the same, divided by the number
+          of output neurons. This is the normalised sparsity measure.
+
+        This replaces the earlier approach of feeding a fixed batch of
+        identical observations, which was biased by the state at (0, 0).
+        """
+        num_output_neurons = self.ac.actor.num_actions
+
+        total_spikes = 0.0
+        total_steps = 0
+
+        for i in range(n_episodes):
+            obs, _ = self.env.reset(seed=seed_start + i)
+            obs_t = self._to_tensor(obs)
+            self.ac.reset()
+
+            for _ in range(10_000):
+                if greedy:
+                    action, spike_counts = self.ac.greedy_action(obs_t)
+                else:
+                    action, _, spike_counts = self.ac.sample_action(obs_t)
+
+                total_spikes += float(spike_counts.sum().item())
+                total_steps += 1
+
+                next_obs, _, term, trunc, _ = self.env.step(int(action.item()))
+                obs_t = self._to_tensor(next_obs)
+                if term or trunc:
+                    break
+
+        eps = 1e-8
+        per_step = total_spikes / max(1, total_steps)
+        return {
+            "spikes_per_step": per_step,
+            "spikes_per_neuron_per_step": per_step / num_output_neurons,
+            "total_steps": float(total_steps),
+            "n_episodes": float(n_episodes),
+        }
     # ------------------------------------------------------------------
     # Episode loops
     # ------------------------------------------------------------------

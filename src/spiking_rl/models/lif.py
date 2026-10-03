@@ -408,3 +408,27 @@ class AdaptiveLIFNode(LIFNodeWithTrace):
         if self.rate_ema is not None:
             info["rate_ema_mean"] = float(self.rate_ema.mean().item())
         return info
+    
+    def get_extra_state(self) -> dict[str, Any]:
+        """Return state that PyTorch's default save/load doesn't capture.
+
+        ``v_threshold`` and ``rate_ema`` are instance attributes that are
+        modified during training but are not registered buffers. Without
+        this override, saving a trained model loses the adapted threshold
+        and the running rate estimate, and loading it silently reverts
+        the network to its initial behavior.
+        """
+        return {
+            "v_threshold": float(self.v_threshold),
+            "rate_ema": (
+                None if self.rate_ema is None else self.rate_ema.detach().clone()
+            ),
+        }
+
+    def set_extra_state(self, state: Any) -> None:
+        """Restore state saved by ``get_extra_state``."""
+        if state is None:
+            return
+        self.v_threshold = float(state["v_threshold"])
+        rate_ema = state["rate_ema"]
+        self.rate_ema = None if rate_ema is None else rate_ema.clone()
