@@ -6,10 +6,9 @@ sparsity–performance–robustness trade-offs emerge.
 
 ## Status
 
-🚧 **In development.** The environment, neuron models, eligibility trace
-mechanism, three-factor learning rule, and actor-critic architecture are
-implemented and tested (109 unit tests passing). The training loop converges
-reliably on the task. Baselines and noise-robustness experiments are next.
+🚧 **In development.** Core pipeline implemented, trained, and evaluated.
+Baselines (Tabular Q, DQN, PPO) and the noise-robustness study are complete.
+Sparsity experiments and ablation studies are next.
 
 ## Research Question
 
@@ -74,7 +73,8 @@ for movement, boundaries, termination, noise statistics, and reproducibility.
 ## Empirical Findings
 
 The training pipeline required four fixes, each grounded in published work and
-verified empirically. We document them because they reflect real constraints of
+verified empirically. The noise-robustness study then produced one additional
+finding. We document them because they reflect real constraints of
 reward-modulated spiking RL that are not always obvious from the literature.
 
 ### Finding 1: Dense reward shaping is required
@@ -115,44 +115,67 @@ threshold. The network goes silent and both actor and critic stop learning.
   SNN-specific initialization scale, so balancing constrains drift without
   fighting the initialization.
 
-Together these mechanisms stabilize the network in a healthy firing regime
-across the entire training run.
-
-### Finding 4: Greedy readout fails on symmetric tasks
+### Finding 4: Greedy readout collapses on symmetric tasks
 
 Our gridworld has a symmetric optimal policy: on an empty grid, "right" and
 "down" are equally good from most states. R-STDP correctly learns a distribution
 with approximately equal probability over the tied actions. But the integer
 spike counts used for readout are **exactly tied** in these states, and
-`argmax` breaks ties by index. The greedy policy therefore collapses to a fixed
-action and fails completely (reward −1.0, 0% success), even though the sampled
-policy reaches the goal in ~10 steps with 100% success.
+`argmax` breaks ties by index. The greedy policy collapses to a fixed action
+and fails completely (reward −1.0, 0% success), while the sampled policy
+reaches the goal with 100% success.
 
-**Decision:** We report sampled-policy evaluation as the primary metric. This is
-a legitimate practice in RL — many published policies are stochastic — and it
-accurately reflects what the network has learned. The greedy-readout limitation
-is documented as a property of integer spike-count output combined with a
-symmetric task, not a failure of the learning rule.
+This is not SNN-specific: **PPO exhibits the same failure** (0% greedy success
+despite 100% sampled success). Both methods learn a stochastic-optimal policy
+on a symmetric task, and argmax collapses the tied actions. Tabular Q and DQN
+avoid this because their value estimates diverge slightly on the tied actions
+during training, giving argmax a meaningful preference.
 
-A future direction is to replace the integer spike-count readout with a
-continuous readout (e.g., membrane potential of a non-spiking output layer), but
-this would require changing the actor's learning rule, since R-STDP requires
-spikes for its eligibility traces.
+**Decision:** We report sampled-policy evaluation for both SNN and PPO, as this
+reflects what the networks actually learned. Greedy collapse is documented as
+a property of integer/discrete readout combined with a symmetric task.
+
+### Finding 5: Partial robustness advantage under observation noise
+
+We evaluated all trained agents (SNN, Tabular Q, DQN, PPO) under three
+independent noise sweeps without retraining. Success rate was saturated at 1.0
+across all noise levels, so we used **step count** as the discriminating metric.
+
+**Transition noise:** All agents affected similarly (~120% increase in steps
+from 0.0 to 0.5 noise). No robustness advantage for the SNN.
+
+**Observation noise:** The SNN's step count stays flat (10.4 → 10.2) across
+σ ∈ [0.0, 0.20], while Tabular Q, DQN, and PPO all show meaningful increases
+(+0.78 to +1.04 steps). The SNN is **measurably more robust** to sensor noise.
+
+**Reward noise:** Not applicable to policy behavior, since we do not retrain.
+All observed deltas are within evaluation noise.
+
+**Interpretation:** The SNN's 5-step spike-count readout acts as a low-pass
+filter: brief input perturbations do not change the accumulated spike count
+enough to change the sampled action. The baselines react to each noisy
+observation. This mechanism helps against short-timescale input perturbations
+but not against systematic action-execution failures (transition noise), which
+is why the advantage is specific to observation noise.
+
+This is a more nuanced result than a simple "stochastic is better" claim, and
+it is consistent with the low-pass-filter interpretation of spike-count
+integration.
 
 ## Key Design Decisions
 
 ### Three-factor rule with eligibility traces
 
 The eligibility trace encodes recent pre×post-synaptic coincidences and decays
-exponentially. This factorization is the basis of both the classical three-factor
-rule (Izhikevich, 2007; Frémaux & Gerstner, 2016) and the modern e-prop
-algorithm (Bellec et al., 2020).
+exponentially. This factorization is the basis of both the classical
+three-factor rule (Izhikevich, 2007; Frémaux & Gerstner, 2016) and the modern
+e-prop algorithm (Bellec et al., 2020).
 
 ### Actor-critic with spiking actor, value critic
 
 Mirrors SpikingJelly's A2C example and the BSVogler actor-critic framework.
-We use TD error as the modulation signal (default) with the option to switch to
-a running reward baseline.
+We use TD error as the modulation signal (default) with the option to switch
+to a running reward baseline.
 
 ### SNN-specific weight initialization
 
@@ -186,21 +209,39 @@ Lateral inhibition is the planned sparsity mechanism for the trade-off
 experiments. Q1 literature (2024 *Biomimetics*; 2013 *PLoS Comp Biol*) supports
 lateral inhibition as a primary driver of sparse cortical codes. The trade-off
 analysis follows the spirit of Bacho & Chu (2023), which established that
-maximum sparsity is not optimal for supervised SNNs — we extend this question to
-reward-modulated spiking RL.
+maximum sparsity is not optimal for supervised SNNs — we extend this question
+to reward-modulated spiking RL.
 
 ## Results Summary
 
-On the training task (5×5 gridworld, goal at (4,4), dense reward):
+### Task performance
+
+5×5 gridworld, goal at (4,4), dense reward, 100 evaluation episodes.
 
 | Policy | Mean reward | Success rate | Mean steps |
 |--------|-------------|--------------|------------|
-| Random | −0.16 | 56% | 73 |
+| Random | −0.17 | 56% | 74 |
 | BFS-optimal | +0.93 | 100% | 8 |
-| **Trained (sampled)** | **+0.91** | **100%** | **10** |
+| Tabular Q (greedy) | +0.93 | 100% | 8 |
+| DQN (greedy) | +0.93 | 100% | 8 |
+| PPO (sampled) | +0.92 | 100% | 9 |
+| **SNN (sampled)** | **+0.91** | **100%** | **10** |
 
-The trained spiking agent essentially matches the BFS-optimal policy in success
-rate while using 10 steps instead of 8.
+The SNN matches the success rate of the conventional baselines while using
+~9,300 parameters and training the actor entirely with local three-factor rules
+(no backprop through the actor).
+
+### Noise robustness (step count change, 0.0 → max noise)
+
+| Agent | Transition (0 → 0.5) | Observation (0 → 0.2) | Reward (0 → 2.0) |
+|-------|----------------------|----------------------|-------------------|
+| Tabular Q | +124% | +13% | 0% |
+| DQN | +124% | +11% | 0% |
+| PPO | +124% | +9% | 0% |
+| SNN | +117% | **−2% (flat)** | 0% |
+
+The SNN is measurably more robust to observation noise, equally affected by
+transition noise, and unaffected by reward noise (as expected).
 
 ## Repository Structure
 
@@ -208,24 +249,23 @@ src/spiking_rl/
 ├── environment/ # Gridworld + noise mechanisms
 ├── models/ # LIF neurons, SNN weight init, actor-critic
 ├── learning/ # Eligibility trace, three-factor learner, agent
-├── baselines/ # Tabular Q, DQN, PPO (planned)
+├── baselines/ # Tabular Q, DQN, PPO
 └── utils/ # Logging, plotting
 
 notebooks/ # Exploration and analysis
-tests/ # Unit tests (109 passing)
+tests/ # Unit tests
 scripts/ # Diagnostics (threshold sweep)
 results/ # Figures and metrics
 
 
 ## Experiments (Planned)
 
-1. **Baselines.** Implement tabular Q, DQN, and PPO on the same environment.
-2. **Sparsity–performance trade-off.** Sweep the lateral-inhibition gain and
+1. **Sparsity–performance trade-off.** Sweep the lateral-inhibition gain and
    measure spikes per episode against success rate (Pareto curve).
-3. **Noise robustness.** Evaluate all agents under transition, observation, and
-   reward noise at multiple levels.
-4. **Eligibility-trace ablation.** Compare the full three-factor rule against
+2. **Eligibility-trace ablation.** Compare the full three-factor rule against
    immediate reward-modulated STDP without traces.
+3. **Architecture ablation.** Compare 1 vs 2 hidden layers, following the
+   Zanatta et al. (2024) finding that shallower SNN-RL topologies perform better.
 
 ## What This Project Does Not Claim
 
@@ -261,17 +301,22 @@ results/ # Figures and metrics
   networks. *Frontiers in Neuroscience*.
 - Micheli, Booij, van Gemert, Tomen (2025). Deep activity propagation via weight
   initialization in spiking neural networks. *IEEE*.
+- Mnih, V. et al. (2015). Human-level control through deep reinforcement
+  learning. *Nature*, 518, 529–533.
 - Potjans, W., Diesmann, M., & Morrison, A. (2011). A spiking neural network
-  model of an actor-critic learning agent. *Neural Computation*, 23(2),
-  269–328.
+  model of an actor-critic learning agent. *Neural Computation*, 23(2), 269–328.
 - Sanda, P., Skorheim, S., & Bazhenov, M. (2017). Multi-layer network utilizing
   rewarded spike time dependent plasticity to learn a foraging task. *PLoS
   Computational Biology*, 13(9), e1005705.
+- Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O. (2017).
+  Proximal policy optimization algorithms. arXiv:1707.06347.
 - Skorheim, S., Lonjers, P., & Bazhenov, M. (2014). A spiking network model of
   decision making employing rewarded STDP. *PLoS ONE*, 9(3), e90821.
 - Sun, Zeng & Li (2022). Solving the spike feature information vanishing problem
   in spiking deep Q network with potential based normalization. *Frontiers in
   Neuroscience*.
+- Zanatta, L. et al. (2024). Comparing SNNs and ANNs for deep reinforcement
+  learning. *Scientific Reports*.
 
 ## Reproducibility
 
