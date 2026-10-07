@@ -209,9 +209,7 @@ class SpikingActorCriticAgent:
         still benefit from balancing to prevent representational collapse. The target 
         L2 norm matches what the SNN-specific initialization
         would produce, so balancing constrains weight *drift* without
-        fighting the initialization. The output layer is excluded
-        because its magnitude directly controls whether it can reach
-        threshold.
+        fighting the initialization.
         """
         target = snn_target_weight_norm(v_threshold=1.0)  # ≈ 2.51
         for layer in self.ac.actor_layers()[:-1]:
