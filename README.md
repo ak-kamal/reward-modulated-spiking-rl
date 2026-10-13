@@ -1,4 +1,4 @@
-# Reward-Modulated Spiking Neural Networks for Adaptive Decision Making Under Noise
+# Reward-Modulated Spiking Neural Network for Adaptive Decision Making Under Noise
 
 A focused investigation of whether a spiking neural network agent can learn adaptive
 decision-making through a reward-modulated three-factor learning rule, and what
